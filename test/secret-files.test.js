@@ -139,6 +139,14 @@ test('blocks copying, moving or linking a secret file to a name that does not lo
   }
 });
 
+test('blocks git mv renaming a secret file to a name that does not look secret', () => {
+  assert.match(reason('Bash', { command: 'git mv .env notes.txt' }) || '', /This moves `\.env`, which is an environment file, to `notes\.txt`/);
+  assert.match(reason('Bash', { command: 'git -C app mv -f config/.env.production settings.txt' }) || '', /This moves `\.env\.production`/);
+  for (const command of ['git mv .env .env.old', 'git mv .env config/', 'git mv -n .env notes.txt', 'git mv src/a.ts src/b.ts', 'git status']) {
+    assert.equal(reason('Bash', { command }), null, command);
+  }
+});
+
 test('a copy into an existing folder keeps its name, so it is allowed', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guardrails-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
