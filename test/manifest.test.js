@@ -5,9 +5,11 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const guards = require('../scripts/guards');
+const { HOOK_BUDGET_MS } = require('../scripts/lib/runner');
 
 const root = path.join(__dirname, '..');
 const readJson = (rel) => JSON.parse(fs.readFileSync(path.join(root, rel), 'utf8'));
+const hookEntries = () => Object.values(readJson('hooks/hooks.json').hooks).flat().flatMap((entry) => entry.hooks);
 
 test('plugin, marketplace and package agree on name and version', () => {
   const plugin = readJson('.claude-plugin/plugin.json');
@@ -21,13 +23,18 @@ test('plugin, marketplace and package agree on name and version', () => {
 });
 
 test('every hook command points at a script that exists', () => {
-  const { hooks } = readJson('hooks/hooks.json');
-  const commands = Object.values(hooks).flat().flatMap((entry) => entry.hooks).map((hook) => hook.command);
+  const commands = hookEntries().map((hook) => hook.command);
   assert.ok(commands.length > 0);
   for (const command of commands) {
     const match = /\$\{CLAUDE_PLUGIN_ROOT\}\/([^"\s]+)/.exec(command);
     assert.ok(match, `${command} is resolved from the plugin root`);
     assert.ok(fs.existsSync(path.join(root, match[1])), `${match[1]} exists`);
+  }
+});
+
+test('the hook timeout leaves room for the whole git budget', () => {
+  for (const hook of hookEntries()) {
+    assert.ok(hook.timeout * 1000 >= HOOK_BUDGET_MS + 5000, `a ${hook.timeout}s hook timeout must exceed the ${HOOK_BUDGET_MS / 1000}s git budget by at least 5s`);
   }
 });
 
