@@ -115,7 +115,10 @@ test('blocks checkout, restore and switch that would discard changes', () => {
   for (const command of ['git checkout main', 'git checkout -b feature', 'git restore --staged .', 'git restore src/app.ts', 'git checkout -- src/app.ts', 'git switch -c feature']) {
     assert.equal(reason(command, { git }), null, command);
   }
-  assert.equal(reason('git checkout -- .', { git: fakeGit({ 'status --porcelain --untracked-files=no -- .': '' }) }), null);
+  const cleanTree = fakeGit({ 'status --porcelain --untracked-files=no -- .': '', 'status --porcelain --untracked-files=no': '' });
+  for (const command of ['git checkout -- .', 'git restore .', 'git checkout -f main', 'git switch --discard-changes main']) {
+    assert.equal(reason(command, { git: cleanTree }), null, `${command} on a clean tree`);
+  }
 });
 
 test('blocks git clean only when there are untracked files to lose', () => {
