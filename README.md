@@ -19,11 +19,11 @@ Inside a Claude Code session, `/plugin marketplace add` and `/plugin install` ta
 
 ## What it blocks
 
-**secret-files** keeps secrets out of the conversation. It blocks reading `.env` files (templates such as `.env.example` stay readable), SSH private keys, `.pem` and `.key` files, cloud credentials and service account keys, whether through the Read tool, Grep, or a command such as `cat`, `grep` or `Get-Content`. Checking that a variable is set with `grep -q '^STRIPE_SECRET_KEY=' .env` still works, because it prints nothing.
+**secret-files** keeps secrets out of the conversation. It blocks reading `.env` files (templates such as `.env.example` stay readable), SSH private keys, certificate and key files such as `.pem` and `.key`, cloud credentials and service account keys, whether through the Read tool, Grep, or a command such as `cat`, `grep`, `sed` or `Get-Content`. It follows symlinks, and it blocks copying, moving or linking a secret file to a name that does not look secret, so a second name cannot carry the file past the check. Checking that a variable is set with `grep -q '^STRIPE_SECRET_KEY=' .env` still works, because it prints nothing.
 
-**force-push** protects the branch you deploy from. It blocks force-pushing `main`, `master` or the remote's default branch, `git push --mirror`, and deleting those branches on the remote. Force-pushing your own feature branch still works.
+**force-push** protects the branch you deploy from. It blocks force-pushing `main`, `master` or the remote's default branch, `git push --mirror`, and deleting those branches on the remote. Force-pushing your own feature branch still works. The default branch comes from git's local record of it (`origin/HEAD`, which `git clone` sets up). In a repository without that record, the guard refuses any force-push it cannot rule out and says how to create the record.
 
-**destructive-commands** protects work that is not saved anywhere else. It blocks recursive deletes of the project folder, any folder above it, your home folder and the whole disk, and it blocks deleting `.git`. It also blocks `git reset --hard`, `git checkout .`, `git restore .`, `git clean -f` and `git stash clear`, but only after asking git whether they would destroy something, so they run as normal when there is nothing to lose. `gh repo delete` is blocked too.
+**destructive-commands** protects work that is not saved anywhere else. It blocks recursive deletes of the project folder, any folder above it, your home folder and the whole disk, and it blocks deleting `.git`. It also blocks `git reset --hard`, `git checkout .`, `git restore .`, `git switch --discard-changes`, `git clean -f` and `git stash clear`, but only after asking git whether they would destroy something, so they run as normal when there is nothing to lose. If git cannot answer, or part of the command only gets its value once the shell runs, those git commands are refused rather than guessed at. `gh repo delete` is blocked too.
 
 Commands are split the way a shell would split them, so a blocked command is still caught after `&&`, inside `$( )`, in `bash -c "..."`, or in PowerShell.
 
@@ -57,7 +57,7 @@ Separate several names with commas. To switch the whole plugin off, run `claude 
 
 ## What it is not
 
-A guardrail, not a sandbox. It reads each command before it runs and catches the ways these accidents usually happen. It cannot see inside a script that Claude writes and then runs, and it will not stop someone who is deliberately working around it. If a guard ever crashes, that call goes ahead and Claude Code shows a hook error, so a broken guard is never mistaken for a working one.
+A guardrail, not a sandbox. It reads each command before it runs and catches the ways these accidents usually happen. It checks Claude Code's built-in Bash, PowerShell, Read and Grep tools, not tools that MCP servers add. It cannot see inside a script that Claude writes and then runs, and it will not stop someone who is deliberately working around it. It judges files by name, so a secret inside a folder that is copied, moved or archived as a whole, with `rsync` or `tar` for example, is not seen. A delete aimed at a variable, such as `rm -rf "$BUILD_DIR"`, is allowed, because the value only exists once the shell runs and blocking every variable would block ordinary work. If a guard ever crashes, that call goes ahead and Claude Code shows a hook error, so a broken guard is never mistaken for a working one.
 
 ## Development
 
