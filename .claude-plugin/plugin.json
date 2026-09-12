@@ -1,0 +1,13 @@
+{
+  "name": "claude-code-guardrails",
+  "version": "0.1.0",
+  "description": "Safety hooks for founders building apps with Claude Code.",
+  "author": {
+    "name": "Ahmad Shayan",
+    "url": "https://ahmadshayan.com"
+  },
+  "homepage": "https://github.com/AhmadShayan/claude-code-guardrails",
+  "repository": "https://github.com/AhmadShayan/claude-code-guardrails",
+  "license": "MIT",
+  "keywords": ["safety", "guardrails", "hooks", "secrets", "git"]
+}
