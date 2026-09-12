@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { decide } = require('../scripts/lib/runner');
+const { decide, makeGit } = require('../scripts/lib/runner');
 
 const guard = (id, tools, check) => ({ id, tools, check });
 const call = (toolName, toolInput = {}) => JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: toolName, tool_input: toolInput, cwd: '/project' });
@@ -83,4 +83,16 @@ test('unreadable or empty input is reported, not treated as safe', () => {
     assert.equal(out.exitCode, 1, `input ${JSON.stringify(raw)}`);
     assert.match(out.stderr, /could not read the hook input/);
   }
+});
+
+test('git answers inside the budget, and a spent budget fails the way a timeout does', () => {
+  assert.match(makeGit(Date.now() + 10000)(['--version'], process.cwd()), /^git version/);
+  assert.throws(() => makeGit(Date.now() - 1)(['--version'], process.cwd()), (err) => err.code === 'ETIMEDOUT');
+});
+
+test('a failed git call keeps what git printed on stderr', () => {
+  assert.throws(
+    () => makeGit(Date.now() + 10000)(['definitely-not-a-git-command'], process.cwd()),
+    (err) => /not a git command/.test(String(err.stderr)),
+  );
 });

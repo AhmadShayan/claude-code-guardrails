@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/run.js\"",
-            "timeout": 15
+            "timeout": 30
           }
         ]
       }
