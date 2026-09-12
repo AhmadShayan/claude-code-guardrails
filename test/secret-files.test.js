@@ -99,6 +99,11 @@ test('lets through commands that use a secret file without printing it', () => {
   assert.equal(reason('PowerShell', { command: 'Select-String -Path .env -Pattern STRIPE -Quiet' }), null);
 });
 
+test('reads PowerShell paths with their backslashes intact', () => {
+  assert.match(reason('PowerShell', { command: 'Get-Content C:\\Users\\me\\app\\.env.local' }) || '', /`\.env\.local` is an environment file/);
+  assert.match(reason('PowerShell', { command: 'type "C:\\Users\\me\\my app\\.env"' }) || '', /`\.env` is an environment file/);
+});
+
 test('the hook denies a Read of .env end to end, and the guard can be switched off', () => {
   const call = toolCall('Read', { file_path: '.env' });
   const { status, decision } = runHook(call);

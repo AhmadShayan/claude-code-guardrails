@@ -1,6 +1,6 @@
 'use strict';
 
-const { commandsOf, SUBSTITUTION } = require('../lib/shell');
+const { commandsOf, dialectOf, SUBSTITUTION } = require('../lib/shell');
 const { parseGit } = require('../lib/git');
 
 // Stops force-pushes to the branch a project deploys from, `git push --mirror`, and deleting
@@ -111,7 +111,7 @@ function pushReason(git, ctx) {
 
 function check(payload, ctx) {
   const command = String((payload.tool_input || {}).command || '');
-  for (const words of commandsOf(command)) {
+  for (const words of commandsOf(command, dialectOf(payload.tool_name))) {
     const git = parseGit(words, payload.cwd, ctx);
     if (!git || git.subcommand !== 'push') continue;
     const reason = pushReason(git, ctx);

@@ -1,6 +1,6 @@
 'use strict';
 
-const { commandsOf, commandName, isRedirect, SUBSTITUTION } = require('../lib/shell');
+const { commandsOf, commandName, dialectOf, isRedirect, SUBSTITUTION } = require('../lib/shell');
 const { segments, baseName } = require('../lib/paths');
 
 // Stops Claude from reading secret files into the conversation: .env files, private keys,
@@ -127,8 +127,8 @@ function filesPrinted(words) {
   return [...inputs, ...positional];
 }
 
-function commandReason(command) {
-  for (const words of commandsOf(command)) {
+function commandReason(command, dialect) {
+  for (const words of commandsOf(command, dialect)) {
     for (const file of filesPrinted(words)) {
       const kind = secretKind(file);
       if (kind) return explain(file, kind, 'this command');
@@ -160,7 +160,7 @@ function check(payload) {
     return kind ? explain(String(input.file_path), kind, 'reading it') : null;
   }
   if (payload.tool_name === 'Grep') return grepReason(input);
-  return commandReason(String(input.command || ''));
+  return commandReason(String(input.command || ''), dialectOf(payload.tool_name));
 }
 
 module.exports = { id: 'secret-files', tools: ['Read', 'Grep', 'Bash', 'PowerShell'], check, secretKind };

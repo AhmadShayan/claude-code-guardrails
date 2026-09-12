@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { SUBSTITUTION, tokenize, commandsOf, commandName } = require('../scripts/lib/shell');
+const { SUBSTITUTION, tokenize, commandsOf, commandName, dialectOf } = require('../scripts/lib/shell');
 
 const has = (commands, words) => commands.some((c) => JSON.stringify(c) === JSON.stringify(words));
 
@@ -56,4 +56,17 @@ test('commandName normalises paths, case and .exe', () => {
   assert.equal(commandName(['/usr/bin/git', 'status']), 'git');
   assert.equal(commandName(['C:\\Program Files\\Git\\cmd\\GIT.EXE']), 'git');
   assert.equal(commandName([]), '');
+});
+
+test('reads PowerShell with PowerShell quoting, so Windows paths keep their backslashes', () => {
+  assert.deepEqual(commandsOf('Remove-Item -Path C:\\Users\\me\\app -Recurse', 'powershell'), [['Remove-Item', '-Path', 'C:\\Users\\me\\app', '-Recurse']]);
+  assert.deepEqual(commandsOf('Write-Output "a`"b" `$HOME', 'powershell'), [['Write-Output', 'a"b', '$HOME']]);
+  assert.ok(has(commandsOf('Write-Output "$(Get-Content .env)"', 'powershell'), ['Get-Content', '.env']));
+  assert.deepEqual(commandsOf('rm -rf C:\\app', 'bash'), [['rm', '-rf', 'C:app']], 'bash really does eat that backslash');
+});
+
+test('reads scripts handed to cmd and powershell with Windows rules', () => {
+  assert.ok(has(commandsOf('powershell -Command "Remove-Item C:\\\\Users\\\\me -Recurse"'), ['Remove-Item', 'C:\\Users\\me', '-Recurse']));
+  assert.equal(dialectOf('PowerShell'), 'powershell');
+  assert.equal(dialectOf('Bash'), 'bash');
 });
