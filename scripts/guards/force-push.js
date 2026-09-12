@@ -5,7 +5,9 @@ const { parseGit } = require('../lib/git');
 
 // Stops force-pushes to the branch a project deploys from, `git push --mirror`, and deleting
 // that branch on the remote. Each one replaces history that other machines, teammates and
-// deploy pipelines already rely on. Force-pushing a feature branch is still allowed.
+// deploy pipelines already rely on. Force-pushing a feature branch is still allowed, once the
+// repository records which branch the remote treats as its default. Without that record the
+// guard cannot rule a branch out, so it refuses.
 
 const ALWAYS_PROTECTED = new Set(['main', 'master']);
 const FORCE_FLAGS = new Set(['--force', '--force-with-lease', '--force-if-includes']);
@@ -19,6 +21,12 @@ const UNKNOWN_BRANCH =
 
 function forceReason(branch) {
   return `This force-pushes \`${branch}\`, which replaces the history on the remote with the history on this machine. Commits on the remote that are not here, such as work pushed from another computer or by a teammate, are deleted, and a deploy that builds from \`${branch}\` can break. Run git pull --rebase and then a plain git push instead. If the user really wants to overwrite the remote branch, they can run the command themselves.`;
+}
+
+function unknownDefaultReason(branch, remote) {
+  const intro = `This force-pushes \`${branch}\`, and this repository has no local record of which branch ${remote ? `\`${remote}\`` : 'that remote'} treats as its default, so the guard cannot rule out that \`${branch}\` is the branch the project deploys from.`;
+  if (!remote) return `${intro} Push to a named remote such as origin instead, or ask the user to run this push.`;
+  return `${intro} Run git remote set-head ${remote} --auto once to record it, and feature branches can be force-pushed after that. Otherwise, ask the user to run this push.`;
 }
 
 function deletionReason(branch) {
@@ -75,11 +83,20 @@ function currentBranch(ctx, dir) {
   return name && name !== 'HEAD' ? name : null;
 }
 
-// main and master, plus whatever the remote reports as its default branch.
-function isProtected(branch, ctx, dir) {
-  if (ALWAYS_PROTECTED.has(branch)) return true;
-  const remoteDefault = gitLine(ctx, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], dir);
-  return remoteDefault !== null && remoteDefault.replace(/^origin\//, '') === branch;
+// The remote a push goes to: its first positional word, or origin when none is named. A URL
+// or a path is not a named remote, so nothing records its default branch.
+function remoteOf(push) {
+  const first = push.positional[0];
+  if (first === undefined) return 'origin';
+  if (first.includes(SUBSTITUTION) || /[:/\\]/.test(first)) return null;
+  return first;
+}
+
+// The branch recorded as the remote's default, in refs/remotes/<remote>/HEAD, or null.
+function recordedDefault(ctx, dir, remote) {
+  if (!remote) return null;
+  const line = gitLine(ctx, ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`], dir);
+  return line && line.startsWith(`${remote}/`) ? line.slice(remote.length + 1) : null;
 }
 
 function pushReason(git, ctx) {
@@ -87,11 +104,19 @@ function pushReason(git, ctx) {
   if (push.dryRun) return null;
   if (push.mirror) return MIRROR;
 
+  const remote = remoteOf(push);
+  let recorded;
+  const remoteDefault = () => {
+    if (recorded === undefined) recorded = recordedDefault(ctx, git.dir, remote);
+    return recorded;
+  };
+
   const refspecs = push.positional.slice(1);
   if (push.deleting || refspecs.some((spec) => spec.startsWith(':'))) {
     const deletable = push.deleting ? refspecs : refspecs.filter((spec) => spec.startsWith(':'));
     for (const target of deletable.map(targetOf)) {
-      if (!target.includes(SUBSTITUTION) && isProtected(target, ctx, git.dir)) return deletionReason(target);
+      if (target.includes(SUBSTITUTION)) continue;
+      if (ALWAYS_PROTECTED.has(target) || target === remoteDefault()) return deletionReason(target);
     }
     if (push.deleting) return null;
   }
@@ -104,7 +129,10 @@ function pushReason(git, ctx) {
       branch = currentBranch(ctx, git.dir);
       if (!branch) return UNKNOWN_BRANCH;
     }
-    if (isProtected(branch, ctx, git.dir)) return forceReason(branch);
+    if (ALWAYS_PROTECTED.has(branch)) return forceReason(branch);
+    const defaultBranch = remoteDefault();
+    if (defaultBranch === null) return unknownDefaultReason(branch, remote);
+    if (defaultBranch === branch) return forceReason(branch);
   }
   return null;
 }
