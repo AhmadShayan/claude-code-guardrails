@@ -18,9 +18,12 @@ function readStdin(stream) {
   });
 }
 
+// Guards read what git prints, so git is asked to answer in English whatever the machine's
+// language, and not to take optional locks while it only looks.
 function git(args, cwd) {
   return execFileSync('git', args, {
     cwd,
+    env: { ...process.env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
     timeout: 5000,
