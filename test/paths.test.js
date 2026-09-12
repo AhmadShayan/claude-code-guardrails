@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { baseName, comparable, resolveFrom, contains, isFilesystemRoot } = require('../scripts/lib/paths');
+const { baseName, comparable, resolveFrom, nativeResolve, contains, isFilesystemRoot } = require('../scripts/lib/paths');
 
 test('baseName reads both slash styles', () => {
   assert.equal(baseName('C:\\app\\.env.local'), '.env.local');
@@ -48,4 +48,16 @@ test('isFilesystemRoot knows / everywhere and drive roots on Windows', () => {
   assert.equal(isFilesystemRoot('/c', 'win32'), true);
   assert.equal(isFilesystemRoot('/c', 'linux'), false);
   assert.equal(isFilesystemRoot('/c/users', 'win32'), false);
+});
+
+test('nativeResolve gives a path this machine can hand to git', () => {
+  const linux = { platform: 'linux', homedir: '/home/me' };
+  assert.equal(nativeResolve('/home/me/app', '../web', linux), '/home/me/web');
+  assert.equal(nativeResolve('/home/me/app', '~/docs', linux), '/home/me/docs');
+  assert.equal(nativeResolve('/home/me/app', '/srv/site', linux), '/srv/site');
+
+  const windows = { platform: 'win32', homedir: 'C:\\Users\\me' };
+  assert.equal(nativeResolve('C:\\Users\\me\\app', '/c/Users/me/web', windows), 'C:\\Users\\me\\web');
+  assert.equal(nativeResolve('C:\\Users\\me\\app', 'packages\\web', windows), 'C:\\Users\\me\\app\\packages\\web');
+  assert.equal(nativeResolve('C:\\Users\\me\\app', '%USERPROFILE%', windows), 'C:\\Users\\me');
 });

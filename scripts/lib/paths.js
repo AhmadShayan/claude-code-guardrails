@@ -1,6 +1,8 @@
 'use strict';
 
-const { posix } = require('path');
+const path = require('path');
+
+const { posix } = path;
 
 // Guards compare paths that arrive in three spellings: Windows (C:\Users\me), Git Bash
 // (/c/Users/me) and POSIX (/home/me). These helpers turn all three into one form, so a
@@ -49,6 +51,15 @@ function resolveFrom(cwd, target, { platform, homedir }) {
   return comparable(`${String(cwd).replace(/\\/g, '/')}/${expanded.replace(/\\/g, '/')}`, platform);
 }
 
+// The same destination, written the way this machine's own programs expect, for handing to
+// git or for following a cd. Git Bash drive paths such as /c/Users become C:/Users on Windows.
+function nativeResolve(cwd, target, { platform, homedir }) {
+  const lib = platform === 'win32' ? path.win32 : path.posix;
+  let expanded = expandVariables(target, { cwd, homedir });
+  if (platform === 'win32') expanded = expanded.replace(/^\/([A-Za-z])(\/|$)/, (_, drive) => `${drive.toUpperCase()}:/`);
+  return lib.resolve(String(cwd), expanded);
+}
+
 // True when `child` is `parent` itself or somewhere inside it. Both must be comparable().
 function contains(parent, child) {
   if (parent === child) return true;
@@ -60,4 +71,4 @@ function isFilesystemRoot(p, platform) {
   return p === '/' || (platform === 'win32' && /^\/[a-z]$/.test(p));
 }
 
-module.exports = { segments, baseName, comparable, resolveFrom, contains, isFilesystemRoot };
+module.exports = { segments, baseName, comparable, resolveFrom, nativeResolve, contains, isFilesystemRoot };
