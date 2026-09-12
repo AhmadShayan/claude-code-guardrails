@@ -11,12 +11,18 @@ const { runHook, toolCall } = require('./helpers');
 
 const LINUX = { platform: 'linux', homedir: '/home/me' };
 const CWD = '/home/me/app';
+const NOT_A_REPO = 'fatal: not a git repository (or any of the parent directories): .git\n';
 
-// Stands in for git with fixed answers, and behaves like "not a git repository" otherwise.
+// An error shaped like the one the runner's git helper throws, with git's stderr attached.
+function gitError(stderr, extra = {}) {
+  return Object.assign(new Error(`git failed: ${stderr.trim()}`), { status: 128, stderr, ...extra });
+}
+
+// Stands in for git with fixed answers, and answers "not a git repository" to anything else.
 function fakeGit(answers = {}) {
   return (args) => {
     const line = args.join(' ');
-    if (!(line in answers)) throw new Error(`fatal: not a git repository (${line})`);
+    if (!(line in answers)) throw gitError(NOT_A_REPO);
     if (answers[line] instanceof Error) throw answers[line];
     return answers[line];
   };
@@ -121,6 +127,14 @@ test('blocks checkout, restore and switch that would discard changes', () => {
   }
 });
 
+test('refuses to discard changes in files it cannot name', () => {
+  const dirty = fakeGit({ 'status --porcelain --untracked-files=no': ' M src/app.ts\n' });
+  assert.match(reason('git restore $(git diff --name-only)', { git: dirty }) || '', /files the guard cannot name until the shell runs, and 1 file has uncommitted changes/);
+  assert.match(reason('git checkout -- "$(cat files.txt)"', { git: dirty }) || '', /cannot name until the shell runs/);
+  assert.equal(reason('git checkout $(git branch --show-current)', { git: dirty }), null, 'without --, that word names a branch as often as a path');
+  assert.equal(reason('git restore $(git diff --name-only)', { git: fakeGit({ 'status --porcelain --untracked-files=no': '' }) }), null);
+});
+
 test('blocks git clean only when there are untracked files to lose', () => {
   const git = fakeGit({ 'clean -n -d': 'Would remove build/\nWould remove notes.md\n', 'clean -n': '', 'clean -n -dx': 'Would remove .env\n' });
   assert.match(reason('git clean -fd', { git }) || '', /2 untracked files and folders, such as `build\/`, `notes\.md`/);
@@ -131,6 +145,13 @@ test('blocks git clean only when there are untracked files to lose', () => {
   assert.equal(reason('git clean -d', { git }), null);
 });
 
+test('refuses git clean when part of the command only gets its value once the shell runs', () => {
+  const git = fakeGit({ 'clean -n -d': 'Would remove notes.md\n' });
+  assert.match(reason('git clean -fd $(printf .)', { git }) || '', /cannot tell what would be deleted/);
+  assert.match(reason('git clean -fd -e "$(cat keep.txt)"', { git }) || '', /cannot tell what would be deleted/);
+  assert.equal(reason('git clean -n $(printf .)', { git }), null, 'a dry run deletes nothing');
+});
+
 test('blocks git stash clear when stashes exist, and gh repo delete', () => {
   assert.match(reason('git stash clear', { git: fakeGit({ 'stash list': 'stash@{0}: WIP\nstash@{1}: WIP\n' }) }) || '', /all 2 saved stashes/);
   assert.equal(reason('git stash clear', { git: fakeGit({ 'stash list': '' }) }), null);
@@ -139,9 +160,27 @@ test('blocks git stash clear when stashes exist, and gh repo delete', () => {
   assert.equal(reason('gh repo view me/app'), null);
 });
 
+test('refuses rather than guesses when git answers with an error', () => {
+  const broken = gitError('fatal: index file smaller than expected\n');
+  const unchecked = /could not check this repository/;
+  assert.match(reason('git reset --hard', { git: fakeGit({ 'status --porcelain --untracked-files=no': broken }) }) || '', unchecked);
+  assert.match(reason('git checkout -- .', { git: fakeGit({ 'status --porcelain --untracked-files=no -- .': broken }) }) || '', unchecked);
+  assert.match(reason('git clean -fd', { git: fakeGit({ 'clean -n -d': broken }) }) || '', unchecked);
+  assert.match(reason('git stash clear', { git: fakeGit({ 'stash list': broken }) }) || '', unchecked);
+  assert.match(reason('git reset --hard HEAD~1', { git: fakeGit({ 'status --porcelain --untracked-files=no': '', 'rev-list --count HEAD~1..HEAD': broken }) }) || '', unchecked);
+});
+
+test('leaves a revision git does not know for git itself to refuse', () => {
+  const git = fakeGit({
+    'status --porcelain --untracked-files=no': '',
+    'rev-list --count nope..HEAD': gitError("fatal: ambiguous argument 'nope..HEAD': unknown revision or path not in the working tree.\n"),
+  });
+  assert.equal(reason('git reset --hard nope', { git }), null);
+});
+
 test('a repository too slow to check is refused rather than waved through', () => {
   const timeout = Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' });
-  assert.match(reason('git reset --hard', { git: fakeGit({ 'status --porcelain --untracked-files=no': timeout }) }) || '', /could not check this repository in time/);
+  assert.match(reason('git reset --hard', { git: fakeGit({ 'status --porcelain --untracked-files=no': timeout }) }) || '', /could not check this repository/);
 });
 
 test('the hook blocks rm -rf . end to end', () => {
@@ -168,10 +207,20 @@ test('asks a real repository before blocking git commands', (t) => {
   assert.match(decide('git reset --hard').permissionDecisionReason, /uncommitted changes in 1 file/);
   assert.match(decide('git checkout -- .').permissionDecisionReason, /uncommitted changes in 1 file/);
   assert.match(decide('git clean -fd').permissionDecisionReason, /1 untracked file or folder, such as `notes\.md`/);
+  assert.match(decide('git clean -fd $(printf .)').permissionDecisionReason, /cannot tell what would be deleted/);
   assert.equal(decide('git clean -n'), null);
 
   git('stash', '-q');
   git('commit', '-q', '--allow-empty', '-m', 'second');
   assert.match(decide('git reset --hard HEAD~1').permissionDecisionReason, /drops 1 commit from it/);
   assert.match(decide('git stash clear').permissionDecisionReason, /deletes the saved stash/);
+});
+
+test('outside any repository the git checks stand aside, because git refuses on its own', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guardrails-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const decide = (command) => runHook(toolCall('Bash', { command }, dir), { GIT_CEILING_DIRECTORIES: path.dirname(dir) }).decision;
+  assert.equal(decide('git reset --hard'), null);
+  assert.equal(decide('git clean -fdx'), null);
+  assert.equal(decide('git stash clear'), null);
 });
