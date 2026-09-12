@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { commandsOf, commandName, dialectOf, isRedirect, SUBSTITUTION } = require('../lib/shell');
 const { segments, baseName } = require('../lib/paths');
+const { parseGit } = require('../lib/git');
 
 // Stops Claude from reading secret files into the conversation: .env files, private keys,
 // cloud credentials and service account keys. Templates such as .env.example stay readable,
@@ -250,22 +251,34 @@ function readCopy(words) {
   return { name, sources: [...sources, ...positional], destination, intoFolder: false };
 }
 
-function copyReason(words, cwd) {
-  const copy = readCopy(words);
+// `git mv` renames a file the way mv does, once git's own options are read past, and its
+// paths are relative to the folder git runs in. A dry run renames nothing.
+function renameTarget(words, cwd, ctx) {
+  const git = parseGit(words, cwd, ctx);
+  if (!git) return { words, base: cwd };
+  if (git.subcommand !== 'mv') return null;
+  const dryRun = git.args.some((arg) => arg === '--dry-run' || (/^-[^-]/.test(arg) && arg.includes('n')));
+  return dryRun ? null : { words: ['mv', ...git.args], base: git.dir };
+}
+
+function copyReason(words, cwd, ctx) {
+  const target = renameTarget(words, cwd, ctx);
+  if (!target) return null;
+  const copy = readCopy(target.words);
   if (!copy || !copy.destination || copy.destination.includes(SUBSTITUTION)) return null;
-  if (copy.intoFolder || /[\\/]$/.test(copy.destination) || isFolder(copy.destination, cwd) || secretKind(copy.destination)) return null;
+  if (copy.intoFolder || /[\\/]$/.test(copy.destination) || isFolder(copy.destination, target.base) || secretKind(copy.destination)) return null;
   for (const source of copy.sources) {
     if (source.includes(SUBSTITUTION)) continue;
-    const found = kindOf(source, cwd);
+    const found = kindOf(source, target.base);
     if (!found) continue;
     return `This ${COPIERS[copy.name]} \`${baseName(source)}\`, which is ${found.kind}, to \`${baseName(copy.destination)}\`, a name that does not look secret. Under that name its secrets (API keys, passwords) could be read into this conversation without this guard noticing. To keep a backup, copy it into a folder so it keeps its name, for example cp ${shellQuote(String(source).replace(/\\/g, '/'))} backups/ instead.`;
   }
   return null;
 }
 
-function commandReason(command, dialect, cwd) {
+function commandReason(command, dialect, cwd, ctx) {
   for (const words of commandsOf(command, dialect)) {
-    const reason = inputReason(words, cwd) || printReason(words, cwd) || copyReason(words, cwd);
+    const reason = inputReason(words, cwd) || printReason(words, cwd) || copyReason(words, cwd, ctx);
     if (reason) return reason;
   }
   return null;
@@ -287,7 +300,7 @@ function grepReason(input, cwd) {
   return null;
 }
 
-function check(payload) {
+function check(payload, ctx = {}) {
   const input = payload.tool_input || {};
   const cwd = payload.cwd;
   if (payload.tool_name === 'Read') {
@@ -295,7 +308,7 @@ function check(payload) {
     return found ? explain(String(input.file_path), found, 'reading it') : null;
   }
   if (payload.tool_name === 'Grep') return grepReason(input, cwd);
-  return commandReason(String(input.command || ''), dialectOf(payload.tool_name), cwd);
+  return commandReason(String(input.command || ''), dialectOf(payload.tool_name), cwd, ctx);
 }
 
 module.exports = { id: 'secret-files', tools: ['Read', 'Grep', 'Bash', 'PowerShell'], check, secretKind };
