@@ -1,0 +1,14 @@
+{
+  "name": "ahmadshayan",
+  "description": "Claude Code plugins by Ahmad Shayan.",
+  "owner": {
+    "name": "Ahmad Shayan"
+  },
+  "plugins": [
+    {
+      "name": "claude-code-guardrails",
+      "source": "./",
+      "description": "Safety hooks for founders building apps with Claude Code."
+    }
+  ]
+}
