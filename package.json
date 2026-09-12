@@ -1,0 +1,14 @@
+{
+  "name": "claude-code-guardrails",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Safety hooks for founders building apps with Claude Code.",
+  "license": "MIT",
+  "author": "Ahmad Shayan",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
