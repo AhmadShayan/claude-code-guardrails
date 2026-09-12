@@ -1,11 +1,15 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const { commandsOf, commandName, dialectOf, isRedirect, SUBSTITUTION } = require('../lib/shell');
 const { segments, baseName } = require('../lib/paths');
 
 // Stops Claude from reading secret files into the conversation: .env files, private keys,
 // cloud credentials and service account keys. Templates such as .env.example stay readable,
-// and so do commands that use a secret file without printing it.
+// and so do commands that use a secret file without printing it. A symlink is followed to
+// the file it points at, and copying, moving or linking a secret to a name that does not
+// look secret is refused, because under the new name it would pass every other check here.
 
 const ENV_FILE = 'an environment file';
 
@@ -27,6 +31,7 @@ const SEARCHERS = {
   ack: [],
   awk: ['-f', '--file'],
   gawk: ['-f', '--file'],
+  sed: ['-e', '-f', '--expression', '--file'],
   jq: ['-f', '--from-file'],
   yq: ['--from-file'],
   'select-string': ['-pattern'],
@@ -37,7 +42,26 @@ const SEARCHERS = {
 const GREP_LIKE = new Set(['grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack']);
 const QUIET_LONG = new Set(['--quiet', '--silent', '--count', '--count-matches', '--files-with-matches', '--files-without-match']);
 
-// What kind of secret a path holds, or null when it is not a secret file.
+// Commands that give a file a second name, and how the refusal describes each.
+const COPIERS = {
+  cp: 'copies',
+  copy: 'copies',
+  'copy-item': 'copies',
+  cpi: 'copies',
+  install: 'copies',
+  dd: 'copies',
+  mv: 'moves',
+  move: 'moves',
+  'move-item': 'moves',
+  mi: 'moves',
+  ren: 'renames',
+  'rename-item': 'renames',
+  rni: 'renames',
+  ln: 'links',
+};
+const POWERSHELL_COPIERS = new Set(['copy-item', 'cpi', 'move-item', 'mi', 'rename-item', 'rni']);
+
+// What kind of secret a path holds by its name, or null when it is not a secret file.
 function secretKind(p) {
   const parts = segments(p);
   if (!parts.length) return null;
@@ -57,18 +81,44 @@ function secretKind(p) {
   return null;
 }
 
+// The kind of secret a path holds, following a symlink to the file it points at. `via` names
+// that file when the path's own name looks innocent.
+function kindOf(p, cwd) {
+  const direct = secretKind(p);
+  if (direct) return { kind: direct, via: null };
+  try {
+    const real = fs.realpathSync.native(path.resolve(cwd || '.', String(p)));
+    const kind = secretKind(real);
+    return kind ? { kind, via: baseName(real) } : null;
+  } catch {
+    return null;
+  }
+}
+
+function isFolder(p, cwd) {
+  try {
+    return fs.statSync(path.resolve(cwd || '.', String(p))).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function shellQuote(text) {
+  return /^[\w./:@%+=,-]+$/.test(text) ? text : `'${text.replace(/'/g, "'\\''")}'`;
+}
+
 function advice(file, kind) {
   if (kind !== ENV_FILE) {
     return ' If a program needs this file, give it the path rather than the contents. If the user needs to see it, they can open it themselves.';
   }
   const shown = String(file).replace(/\\/g, '/');
-  const quoted = /\s/.test(shown) ? `'${shown}'` : shown;
-  const sourced = shown.includes('/') ? quoted : `./${quoted}`;
-  return ` To confirm a variable is set without printing it, run: grep -q '^VARIABLE_NAME=' ${quoted} && echo set. To load the variables into a shell, run: set -a; . ${sourced}; set +a. If the user needs to see the values, they can open the file themselves.`;
+  const sourced = shown.includes('/') ? shown : `./${shown}`;
+  return ` To confirm a variable is set without printing it, run: grep -q '^VARIABLE_NAME=' ${shellQuote(shown)} && echo set. To load the variables into a shell, run: set -a; . ${shellQuote(sourced)}; set +a. If the user needs to see the values, they can open the file themselves.`;
 }
 
-function explain(file, kind, action) {
-  return `\`${baseName(file)}\` is ${kind}, and ${action} would copy its secrets (API keys, passwords) into this conversation.${advice(file, kind)}`;
+function explain(file, found, action) {
+  const subject = found.via ? `\`${baseName(file)}\` points to \`${found.via}\`, which is ${found.kind}` : `\`${baseName(file)}\` is ${found.kind}`;
+  return `${subject}, and ${action} would copy its secrets (API keys, passwords) into this conversation.${advice(file, found.kind)}`;
 }
 
 function isFlag(name, word) {
@@ -76,23 +126,29 @@ function isFlag(name, word) {
   return word.length > 1 && word.startsWith('-');
 }
 
-// Flags that make a search print only counts, file names or an exit status.
+// Flags that make a command print only counts, file names or an exit status, or, for sed,
+// write its result back into the file instead of printing it.
 function isQuiet(name, word) {
   const lower = word.toLowerCase();
   if (name === 'findstr') return lower === '/m';
   if (name === 'select-string' || name === 'sls') return lower === '-quiet';
+  if (name === 'sed') return word === '--in-place' || word.startsWith('--in-place=') || (/^-[^-]/.test(word) && word.slice(1).includes('i'));
   if (!GREP_LIKE.has(name)) return false;
   if (word.startsWith('--')) return QUIET_LONG.has(word.split('=')[0]);
   return /[qclL]/.test(word.slice(1));
 }
 
-// The files a command prints, as far as its words show.
+// The files a command prints from its arguments, as far as its words show.
 function filesPrinted(words) {
   const name = commandName(words);
+  if (name === 'dd') {
+    const input = words.find((word) => word.startsWith('if='));
+    const writesElsewhere = words.some((word) => word.startsWith('of='));
+    return input && !writesElsewhere ? [input.slice(3)] : [];
+  }
   const patternFlags = SEARCHERS[name];
   if (!PRINTERS.has(name) && !patternFlags) return [];
 
-  const inputs = [];
   const positional = [];
   let patternGiven = false;
   let flagsDone = false;
@@ -100,8 +156,7 @@ function filesPrinted(words) {
   for (let i = 1; i < words.length; i += 1) {
     const word = words[i];
     if (isRedirect(word)) {
-      if (word === '<' && words[i + 1] !== undefined) inputs.push(words[i + 1]);
-      i += 1;
+      i += 1; // the word after a redirection is its target, which inputReason checks
       continue;
     }
     if (word.includes(SUBSTITUTION)) continue;
@@ -124,24 +179,103 @@ function filesPrinted(words) {
   }
 
   if (patternFlags && !patternGiven) positional.shift();
-  return [...inputs, ...positional];
+  return positional;
 }
 
-function commandReason(command, dialect) {
-  for (const words of commandsOf(command, dialect)) {
-    for (const file of filesPrinted(words)) {
-      const kind = secretKind(file);
-      if (kind) return explain(file, kind, 'this command');
-    }
+// `command < file` hands the whole file to the command, whatever the command is.
+function inputReason(words, cwd) {
+  for (let i = 0; i < words.length - 1; i += 1) {
+    if (words[i] !== '<' || words[i + 1].includes(SUBSTITUTION)) continue;
+    const found = kindOf(words[i + 1], cwd);
+    if (found) return explain(words[i + 1], found, 'feeding it to this command');
   }
   return null;
 }
 
-function grepReason(input) {
+function printReason(words, cwd) {
+  for (const file of filesPrinted(words)) {
+    const found = kindOf(file, cwd);
+    if (found) return explain(file, found, 'this command');
+  }
+  return null;
+}
+
+// Reads `cp a b`, `ln -s target name`, `dd if=a of=b`, `Copy-Item -Path a -Destination b`
+// and similar into the files being copied and where they go.
+function readCopy(words) {
+  const name = commandName(words);
+  if (!COPIERS[name]) return null;
+  if (name === 'dd') {
+    const input = words.find((word) => word.startsWith('if='));
+    const output = words.find((word) => word.startsWith('of='));
+    return output ? { name, sources: input ? [input.slice(3)] : [], destination: output.slice(3), intoFolder: false } : null;
+  }
+  const powershell = POWERSHELL_COPIERS.has(name);
+  const sources = [];
+  const positional = [];
+  let destination = null;
+  let folder = null;
+  for (let i = 1; i < words.length; i += 1) {
+    const word = words[i];
+    const lower = word.toLowerCase();
+    if (isRedirect(word)) {
+      i += 1;
+      continue;
+    }
+    if (powershell && word.startsWith('-')) {
+      if ((lower === '-path' || lower === '-literalpath') && words[i + 1] !== undefined) {
+        i += 1;
+        sources.push(words[i]);
+      } else if ((lower === '-destination' || lower === '-newname') && words[i + 1] !== undefined) {
+        i += 1;
+        destination = words[i];
+      }
+      continue;
+    }
+    if (!powershell && (word === '-t' || word === '--target-directory') && words[i + 1] !== undefined) {
+      i += 1;
+      folder = words[i];
+      continue;
+    }
+    if (!powershell && word.startsWith('--target-directory=')) {
+      folder = word.slice('--target-directory='.length);
+      continue;
+    }
+    if (word.length > 1 && word.startsWith('-')) continue;
+    if (/^\/[a-z]$/i.test(word) && ['copy', 'move', 'ren'].includes(name)) continue;
+    positional.push(word);
+  }
+  if (folder !== null) return { name, sources: [...sources, ...positional], destination: folder, intoFolder: true };
+  if (destination === null && positional.length > 1) destination = positional.pop();
+  return { name, sources: [...sources, ...positional], destination, intoFolder: false };
+}
+
+function copyReason(words, cwd) {
+  const copy = readCopy(words);
+  if (!copy || !copy.destination || copy.destination.includes(SUBSTITUTION)) return null;
+  if (copy.intoFolder || /[\\/]$/.test(copy.destination) || isFolder(copy.destination, cwd) || secretKind(copy.destination)) return null;
+  for (const source of copy.sources) {
+    if (source.includes(SUBSTITUTION)) continue;
+    const found = kindOf(source, cwd);
+    if (!found) continue;
+    return `This ${COPIERS[copy.name]} \`${baseName(source)}\`, which is ${found.kind}, to \`${baseName(copy.destination)}\`, a name that does not look secret. Under that name its secrets (API keys, passwords) could be read into this conversation without this guard noticing. To keep a backup, copy it into a folder so it keeps its name, for example cp ${shellQuote(String(source).replace(/\\/g, '/'))} backups/ instead.`;
+  }
+  return null;
+}
+
+function commandReason(command, dialect, cwd) {
+  for (const words of commandsOf(command, dialect)) {
+    const reason = inputReason(words, cwd) || printReason(words, cwd) || copyReason(words, cwd);
+    if (reason) return reason;
+  }
+  return null;
+}
+
+function grepReason(input, cwd) {
   if ((input.output_mode || 'files_with_matches') !== 'content') return null;
   if (input.path) {
-    const kind = secretKind(input.path);
-    if (kind) return explain(String(input.path), kind, 'searching it');
+    const found = kindOf(input.path, cwd);
+    if (found) return explain(String(input.path), found, 'searching it');
   }
   if (input.glob) {
     const last = segments(String(input.glob)).pop() || '';
@@ -155,12 +289,13 @@ function grepReason(input) {
 
 function check(payload) {
   const input = payload.tool_input || {};
+  const cwd = payload.cwd;
   if (payload.tool_name === 'Read') {
-    const kind = input.file_path ? secretKind(input.file_path) : null;
-    return kind ? explain(String(input.file_path), kind, 'reading it') : null;
+    const found = input.file_path ? kindOf(input.file_path, cwd) : null;
+    return found ? explain(String(input.file_path), found, 'reading it') : null;
   }
-  if (payload.tool_name === 'Grep') return grepReason(input);
-  return commandReason(String(input.command || ''), dialectOf(payload.tool_name));
+  if (payload.tool_name === 'Grep') return grepReason(input, cwd);
+  return commandReason(String(input.command || ''), dialectOf(payload.tool_name), cwd);
 }
 
 module.exports = { id: 'secret-files', tools: ['Read', 'Grep', 'Bash', 'PowerShell'], check, secretKind };
