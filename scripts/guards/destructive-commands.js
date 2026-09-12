@@ -2,17 +2,21 @@
 
 const { commandsOf, commandName, dialectOf, isRedirect, SUBSTITUTION } = require('../lib/shell');
 const { segments, comparable, resolveFrom, nativeResolve, contains, isFilesystemRoot } = require('../lib/paths');
-const { parseGit } = require('../lib/git');
+const { parseGit, askGit } = require('../lib/git');
 
 // Stops commands that destroy work in ways that are hard or impossible to undo: deleting the
 // project, the home folder, the disk or a repository's history, and git commands that throw
 // away work nobody has saved. Every git check asks the repository first, so the same command
-// runs freely when there is nothing to lose.
+// runs freely when there is nothing to lose. When git cannot answer, or part of a git
+// command only gets its value once the shell runs, the check refuses rather than guessing.
 
 const BYPASS = ' If the user really wants this, they can run the command themselves.';
 
-const SLOW =
-  'The guard could not check this repository in time, so it cannot tell whether this command throws away work. Run git status first, or ask the user to run the command.';
+const UNCHECKED =
+  'The guard could not check this repository (git did not answer in time, or answered with an error), so it cannot tell whether this command throws away work. Run git status to see what is going on, or ask the user to run the command.';
+
+const UNKNOWN_CLEAN =
+  'git clean deletes untracked files, and part of this command only gets its value once the shell runs it, so the guard cannot tell what would be deleted. Write the paths out and check them with git clean -n first, or ask the user to run the command.';
 
 const WINDOWS_REMOVERS = new Set(['remove-item', 'ri', 'rmdir', 'rd', 'del', 'erase']);
 const CHANGE_DIRECTORY = new Set(['cd', 'chdir', 'pushd', 'set-location', 'sl']);
@@ -28,14 +32,6 @@ function lines(text) {
     .split('\n')
     .map((line) => line.trimEnd())
     .filter(Boolean);
-}
-
-function runGit(ctx, args, dir) {
-  try {
-    return { ok: true, out: String(ctx.git(args, dir)) };
-  } catch (err) {
-    return { ok: false, timedOut: Boolean(err && (err.code === 'ETIMEDOUT' || err.signal === 'SIGTERM')) };
-  }
 }
 
 // A word whose value only exists once the shell runs it, such as $BUILD_DIR or $(...).
@@ -123,12 +119,14 @@ function nextCwd(words, cwd, ctx) {
 
 // ---- git ----
 
+// How many files have uncommitted changes: 0 outside a repository, where the command being
+// checked fails on its own, and null when git could not say.
 function changedFiles(ctx, dir, pathspecs = []) {
   const args = ['status', '--porcelain', '--untracked-files=no'];
   if (pathspecs.length) args.push('--', ...pathspecs);
-  const result = runGit(ctx, args, dir);
-  if (result.timedOut) return null;
-  return result.ok ? lines(result.out).length : 0;
+  const result = askGit(ctx, args, dir);
+  if (result.ok) return lines(result.out).length;
+  return result.failure === 'not-a-repository' ? 0 : null;
 }
 
 function discardedChanges(changed) {
@@ -138,7 +136,7 @@ function discardedChanges(changed) {
 function resetReason(git, ctx) {
   if (!git.args.includes('--hard')) return null;
   const changed = changedFiles(ctx, git.dir);
-  if (changed === null) return SLOW;
+  if (changed === null) return UNCHECKED;
   if (changed > 0) {
     return `git reset --hard throws away the uncommitted changes in ${plural(changed, 'file')}, and git keeps no copy of them. Save them first with git stash, or commit them, and then reset.${BYPASS}`;
   }
@@ -147,9 +145,14 @@ function resetReason(git, ctx) {
   if (target.includes(SUBSTITUTION)) {
     return 'git reset --hard moves this branch to a commit the guard cannot see until the command runs, so it may drop commits from the branch. Name the commit in the command, or ask the user to run it.';
   }
-  const count = runGit(ctx, ['rev-list', '--count', `${target}..HEAD`], git.dir);
-  if (count.timedOut) return SLOW;
-  const dropped = count.ok ? parseInt(count.out.trim(), 10) || 0 : 0;
+  const count = askGit(ctx, ['rev-list', '--count', `${target}..HEAD`], git.dir);
+  if (!count.ok) {
+    // Outside a repository, or for a revision git does not know, the reset fails on its own.
+    if (count.failure === 'not-a-repository') return null;
+    if (count.failure === 'error' && /unknown revision|bad revision|ambiguous argument/i.test(count.stderr)) return null;
+    return UNCHECKED;
+  }
+  const dropped = parseInt(count.out.trim(), 10) || 0;
   if (dropped === 0) return null;
   return `git reset --hard ${target} moves this branch back and drops ${plural(dropped, 'commit')} from it. They can only be recovered through the reflog, which most people never find. To keep them reachable, create a backup first with git branch backup-before-reset.${BYPASS}`;
 }
@@ -189,23 +192,32 @@ function discardReason(git, ctx) {
 
   if (subcommand === 'restore' && staged && !worktree) return null;
   const broad = specs.filter((spec) => isBroad(spec, git.dir, ctx));
-  if (!force && !broad.length) return null;
-  const changed = changedFiles(ctx, git.dir, force ? [] : broad);
-  if (changed === null) return SLOW;
-  return changed > 0 ? discardedChanges(changed) : null;
+  const unnamed = specs.some((spec) => isUnknown(spec));
+  if (!force && !broad.length && !unnamed) return null;
+  const changed = changedFiles(ctx, git.dir, force || unnamed ? [] : broad);
+  if (changed === null) return UNCHECKED;
+  if (changed === 0) return null;
+  if (!force && !broad.length) {
+    return `This discards changes in files the guard cannot name until the shell runs, and ${plural(changed, 'file has', 'files have')} uncommitted changes it could reach. Git keeps no copy of them. Name the files in the command, or save the changes first with git stash.${BYPASS}`;
+  }
+  return discardedChanges(changed);
 }
 
 function cleanReason(git, ctx) {
   let force = false;
   let dryRun = false;
+  let unknown = false;
   const preview = ['clean', '-n'];
   for (let i = 0; i < git.args.length; i += 1) {
     const arg = git.args[i];
-    if (arg === '--force') force = true;
+    if (arg.includes(SUBSTITUTION)) unknown = true;
+    else if (arg === '--force') force = true;
     else if (arg === '--dry-run') dryRun = true;
     else if (arg === '--interactive' || arg === '--quiet') continue;
     else if (arg === '-e' || arg === '--exclude') {
-      if (git.args[i + 1] !== undefined) preview.push(arg, git.args[i + 1]);
+      const value = git.args[i + 1];
+      if (value !== undefined && value.includes(SUBSTITUTION)) unknown = true;
+      else if (value !== undefined) preview.push(arg, value);
       i += 1;
     } else if (/^-[^-]/.test(arg)) {
       if (arg.includes('f')) force = true;
@@ -217,10 +229,10 @@ function cleanReason(git, ctx) {
     }
   }
   if (!force || dryRun) return null;
+  if (unknown) return UNKNOWN_CLEAN;
 
-  const result = runGit(ctx, preview, git.dir);
-  if (result.timedOut) return SLOW;
-  if (!result.ok) return null;
+  const result = askGit(ctx, preview, git.dir);
+  if (!result.ok) return result.failure === 'not-a-repository' ? null : UNCHECKED;
   const doomed = lines(result.out)
     .filter((line) => line.startsWith('Would remove '))
     .map((line) => line.slice('Would remove '.length));
@@ -234,9 +246,9 @@ function cleanReason(git, ctx) {
 
 function stashReason(git, ctx) {
   if (git.args.find((arg) => !arg.startsWith('-')) !== 'clear') return null;
-  const result = runGit(ctx, ['stash', 'list'], git.dir);
-  if (result.timedOut) return SLOW;
-  const count = result.ok ? lines(result.out).length : 0;
+  const result = askGit(ctx, ['stash', 'list'], git.dir);
+  if (!result.ok) return result.failure === 'not-a-repository' ? null : UNCHECKED;
+  const count = lines(result.out).length;
   if (count === 0) return null;
   const which = count === 1 ? 'the saved stash' : `all ${count} saved stashes`;
   return `git stash clear deletes ${which}, and the changes in them cannot be recovered. Drop only the stash that is no longer needed, with git stash drop stash@{n}.${BYPASS}`;

@@ -22,4 +22,20 @@ function parseGit(words, cwd, ctx = {}) {
   return { subcommand: words[i], args: words.slice(i + 1), dir };
 }
 
-module.exports = { parseGit };
+// Why a question to git failed. "not-a-repository" means there is nothing to protect,
+// because the command being checked fails the same way. "timeout" and "error" mean the
+// guard could not check, and a guard refuses rather than guessing.
+function gitFailure(err) {
+  if (err && (err.code === 'ETIMEDOUT' || err.signal === 'SIGTERM')) return 'timeout';
+  return /not a git repository/i.test(String((err && err.stderr) || '')) ? 'not-a-repository' : 'error';
+}
+
+function askGit(ctx, args, dir) {
+  try {
+    return { ok: true, out: String(ctx.git(args, dir)) };
+  } catch (err) {
+    return { ok: false, failure: gitFailure(err), stderr: String((err && err.stderr) || '') };
+  }
+}
+
+module.exports = { parseGit, askGit, gitFailure };
