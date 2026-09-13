@@ -6,6 +6,10 @@ Safety hooks for building with Claude Code. They stop the handful of commands th
 
 Claude Code works in your real project, with your real files, keys and git history, and almost everything it does there is exactly what you asked for. The exceptions are rare and expensive: an `.env` file printed into the chat, `rm -rf` pointed one folder too high, a force-push over the branch your site deploys from, or `git reset --hard` on an afternoon of uncommitted work. This plugin catches those. When it blocks something, Claude sees the reason and a safer way to get the job done, so the session keeps moving.
 
+![Replay of a Claude Code session: asked to back up .env by copying it to env-backup.txt, Claude runs cp .env env-backup.txt, the secret-files hook blocks it because the new name does not look secret, and Claude suggests cp .env backups/.env or cp .env .env.backup instead.](docs/demo.gif)
+
+*Replayed from a real headless Claude Code 2.1.228 session (claude -p) on Windows. The prompt, command, hook denial and Claude's reply are the session's own words; the window, layout, colors, code formatting, line wrapping, typing and timing are illustrative.*
+
 ## Install
 
 From a terminal:
