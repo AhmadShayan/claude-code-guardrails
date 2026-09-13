@@ -1,13 +1,14 @@
 'use strict';
 
-const { commandsOf, dialectOf, SUBSTITUTION } = require('../lib/shell');
+const { commandsOf, dialectOf, hasShellValue } = require('../lib/shell');
 const { parseGit } = require('../lib/git');
 
 // Stops force-pushes to the branch a project deploys from, `git push --mirror`, and deleting
 // that branch on the remote. Each one replaces history that other machines, teammates and
 // deploy pipelines already rely on. Force-pushing a feature branch is still allowed, once the
 // repository records which branch the remote treats as its default. Without that record the
-// guard cannot rule a branch out, so it refuses.
+// guard cannot rule a branch out, so it refuses. It refuses in the same way when the shell
+// fills in the branch name, as in $BRANCH or $(...), because that name could be main.
 
 const ALWAYS_PROTECTED = new Set(['main', 'master']);
 const FORCE_FLAGS = new Set(['--force', '--force-with-lease', '--force-if-includes']);
@@ -18,6 +19,12 @@ const MIRROR =
 
 const UNKNOWN_BRANCH =
   'This force-pushes the current branch, and the guard could not tell which branch that is, so it cannot rule out the one the project deploys from. Name the branch in the command, for example git push --force-with-lease origin my-feature, or ask the user to run it.';
+
+const UNNAMED_BRANCH =
+  'This force-pushes a branch whose name only gets its value once the shell runs, so the guard cannot tell which branch it is and cannot rule out the one the project deploys from. Write the branch name out, for example git push --force-with-lease origin my-feature, or ask the user to run the command.';
+
+const UNNAMED_DELETION =
+  'This deletes a branch on the remote whose name only gets its value once the shell runs, so the guard cannot rule out main or the branch the project deploys from. Write the branch name out, or ask the user to run the command.';
 
 function forceReason(branch) {
   return `This force-pushes \`${branch}\`, which replaces the history on the remote with the history on this machine. Commits on the remote that are not here, such as work pushed from another computer or by a teammate, are deleted, and a deploy that builds from \`${branch}\` can break. Run git pull --rebase and then a plain git push instead. If the user really wants to overwrite the remote branch, they can run the command themselves.`;
@@ -63,9 +70,10 @@ function readPush(args) {
   return push;
 }
 
-// The branch a refspec writes to: "+HEAD:main" and "main" both write to main.
+// The branch a refspec writes to: "+HEAD:main" and "main" both write to main. PowerShell's
+// $env:NAME is one variable, so its colon is not read as the one between source and target.
 function targetOf(refspec) {
-  const spec = refspec.replace(/^\+/, '');
+  const spec = refspec.replace(/^\+/, '').replace(/\$env:(\w+)/gi, '$$$1');
   const colon = spec.lastIndexOf(':');
   return (colon >= 0 ? spec.slice(colon + 1) : spec).replace(/^refs\/heads\//, '');
 }
@@ -88,7 +96,7 @@ function currentBranch(ctx, dir) {
 function remoteOf(push) {
   const first = push.positional[0];
   if (first === undefined) return 'origin';
-  if (first.includes(SUBSTITUTION) || /[:/\\]/.test(first)) return null;
+  if (hasShellValue(first) || /[:/\\]/.test(first)) return null;
   return first;
 }
 
@@ -115,7 +123,7 @@ function pushReason(git, ctx) {
   if (push.deleting || refspecs.some((spec) => spec.startsWith(':'))) {
     const deletable = push.deleting ? refspecs : refspecs.filter((spec) => spec.startsWith(':'));
     for (const target of deletable.map(targetOf)) {
-      if (target.includes(SUBSTITUTION)) continue;
+      if (hasShellValue(target)) return UNNAMED_DELETION;
       if (ALWAYS_PROTECTED.has(target) || target === remoteDefault()) return deletionReason(target);
     }
     if (push.deleting) return null;
@@ -124,7 +132,7 @@ function pushReason(git, ctx) {
   const forced = push.force ? (refspecs.length ? refspecs : [null]) : refspecs.filter((spec) => spec.startsWith('+'));
   for (const spec of forced) {
     let branch = spec === null ? 'HEAD' : targetOf(spec);
-    if (branch.includes(SUBSTITUTION)) return UNKNOWN_BRANCH;
+    if (hasShellValue(branch)) return UNNAMED_BRANCH;
     if (branch === 'HEAD') {
       branch = currentBranch(ctx, git.dir);
       if (!branch) return UNKNOWN_BRANCH;

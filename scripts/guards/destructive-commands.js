@@ -1,14 +1,15 @@
 'use strict';
 
-const { commandsOf, commandName, dialectOf, isRedirect, SUBSTITUTION } = require('../lib/shell');
+const { commandsOf, commandName, dialectOf, isRedirect, hasShellValue } = require('../lib/shell');
 const { segments, comparable, resolveFrom, nativeResolve, contains, isFilesystemRoot } = require('../lib/paths');
 const { parseGit, askGit } = require('../lib/git');
 
 // Stops commands that destroy work in ways that are hard or impossible to undo: deleting the
 // project, the home folder, the disk or a repository's history, and git commands that throw
 // away work nobody has saved. Every git check asks the repository first, so the same command
-// runs freely when there is nothing to lose. When git cannot answer, or part of a git
-// command only gets its value once the shell runs, the check refuses rather than guessing.
+// runs freely when there is nothing to lose. When git cannot answer, or a git command names
+// its commit, files or action with something the shell only fills in when it runs, such as
+// $REF or $(...), the check refuses rather than guessing whenever there is work to lose.
 
 const BYPASS = ' If the user really wants this, they can run the command themselves.';
 
@@ -34,10 +35,10 @@ function lines(text) {
     .filter(Boolean);
 }
 
-// A word whose value only exists once the shell runs it, such as $BUILD_DIR or $(...).
+// A path whose value only exists once the shell runs it, such as $BUILD_DIR or $(...). The
+// home and working folders are known, so $HOME/x and $PWD/x still count as named.
 function isUnknown(word) {
-  if (word.includes(SUBSTITUTION)) return true;
-  return /[$%]/.test(word.replace(KNOWN_PREFIX, ''));
+  return hasShellValue(word.replace(KNOWN_PREFIX, ''));
 }
 
 // ---- Deleting files and folders ----
@@ -142,7 +143,7 @@ function resetReason(git, ctx) {
   }
   const target = git.args.find((arg) => !arg.startsWith('-'));
   if (!target || target === 'HEAD') return null;
-  if (target.includes(SUBSTITUTION)) {
+  if (hasShellValue(target)) {
     return 'git reset --hard moves this branch to a commit the guard cannot see until the command runs, so it may drop commits from the branch. Name the commit in the command, or ask the user to run it.';
   }
   const count = askGit(ctx, ['rev-list', '--count', `${target}..HEAD`], git.dir);
@@ -203,40 +204,55 @@ function discardReason(git, ctx) {
   return discardedChanges(changed);
 }
 
+// git clean -f, when it would delete untracked files. A word the shell fills in could be any
+// path, so the preview leaves it out and looks at the whole tree. Before -- it could also be
+// any option, -f, -d or -x included, so the preview then takes the widest reading.
 function cleanReason(git, ctx) {
   let force = false;
   let dryRun = false;
+  let optionsDone = false;
   let unknown = false;
-  const preview = ['clean', '-n'];
+  let unknownOption = false;
+  const options = [];
+  const excludes = [];
+  const paths = [];
   for (let i = 0; i < git.args.length; i += 1) {
     const arg = git.args[i];
-    if (arg.includes(SUBSTITUTION)) unknown = true;
+    if (hasShellValue(arg)) {
+      unknown = true;
+      if (!optionsDone) unknownOption = true;
+    } else if (optionsDone) paths.push(arg);
+    else if (arg === '--') optionsDone = true;
     else if (arg === '--force') force = true;
     else if (arg === '--dry-run') dryRun = true;
     else if (arg === '--interactive' || arg === '--quiet') continue;
     else if (arg === '-e' || arg === '--exclude') {
       const value = git.args[i + 1];
-      if (value !== undefined && value.includes(SUBSTITUTION)) unknown = true;
-      else if (value !== undefined) preview.push(arg, value);
+      if (value !== undefined && hasShellValue(value)) unknown = true;
+      else if (value !== undefined) excludes.push(arg, value);
       i += 1;
     } else if (/^-[^-]/.test(arg)) {
       if (arg.includes('f')) force = true;
       if (arg.includes('n')) dryRun = true;
       const kept = arg.slice(1).replace(/[fniq]/g, '');
-      if (kept) preview.push(`-${kept}`);
+      if (kept) options.push(`-${kept}`);
+    } else if (arg.startsWith('--')) {
+      options.push(arg);
     } else {
-      preview.push(arg);
+      paths.push(arg);
     }
   }
-  if (!force || dryRun) return null;
-  if (unknown) return UNKNOWN_CLEAN;
+  if (dryRun || !(force || unknownOption)) return null;
 
+  const named = unknown || !paths.length ? [] : ['--', ...paths];
+  const preview = unknownOption ? ['clean', '-n', '-d', '-x', ...excludes] : ['clean', '-n', ...options, ...excludes, ...named];
   const result = askGit(ctx, preview, git.dir);
   if (!result.ok) return result.failure === 'not-a-repository' ? null : UNCHECKED;
   const doomed = lines(result.out)
     .filter((line) => line.startsWith('Would remove '))
     .map((line) => line.slice('Would remove '.length));
   if (!doomed.length) return null;
+  if (unknown) return UNKNOWN_CLEAN;
   const sample = doomed
     .slice(0, 3)
     .map((item) => `\`${item}\``)
@@ -244,13 +260,27 @@ function cleanReason(git, ctx) {
   return `git clean deletes ${plural(doomed.length, 'untracked file or folder', 'untracked files and folders')}, such as ${sample}. Git never saved them, so they cannot be recovered. List them with git clean -n and delete only what should go.${BYPASS}`;
 }
 
+// The stash action a command runs, such as clear or pop, reading past a message given with -m.
+function stashAction(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === '-m' || args[i] === '--message') i += 1;
+    else if (!args[i].startsWith('-')) return args[i];
+  }
+  return undefined;
+}
+
 function stashReason(git, ctx) {
-  if (git.args.find((arg) => !arg.startsWith('-')) !== 'clear') return null;
+  const action = stashAction(git.args);
+  const unnamed = action !== undefined && hasShellValue(action);
+  if (action !== 'clear' && !unnamed) return null;
   const result = askGit(ctx, ['stash', 'list'], git.dir);
   if (!result.ok) return result.failure === 'not-a-repository' ? null : UNCHECKED;
   const count = lines(result.out).length;
   if (count === 0) return null;
-  const which = count === 1 ? 'the saved stash' : `all ${count} saved stashes`;
+  const which = count === 1 ? 'the saved stash' : count === 2 ? 'both saved stashes' : `all ${count} saved stashes`;
+  if (unnamed) {
+    return `This runs a git stash action the guard cannot name until the shell runs, and it could be git stash clear, which deletes ${which}. Write the action out, or ask the user to run the command.`;
+  }
   return `git stash clear deletes ${which}, and the changes in them cannot be recovered. Drop only the stash that is no longer needed, with git stash drop stash@{n}.${BYPASS}`;
 }
 

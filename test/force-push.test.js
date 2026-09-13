@@ -84,7 +84,17 @@ test('refuses a force-push it cannot rule out when no default branch is recorded
 
 test('refuses when it cannot tell which branch a force-push writes to', () => {
   assert.match(reason('git push -f', { branch: null }), /could not tell which branch/);
-  assert.match(reason('git push -f origin "$(git branch --show-current)"', { branch: 'feature' }), /could not tell which branch/);
+  assert.match(reason('git push -f origin "$(git branch --show-current)"', { branch: 'feature' }), /cannot tell which branch/);
+});
+
+test('refuses a force-push or remote delete when the shell fills in the branch', () => {
+  const pushes = ['git push --force origin $BRANCH', 'git push --force origin "${BRANCH}"', 'git push -f origin HEAD:$BRANCH', 'git push --force-with-lease origin $BRANCH', 'git push origin +$BRANCH'];
+  for (const command of pushes) assert.match(reason(command, { branch: 'feature' }) || '', /cannot tell which branch/, command);
+  assert.match(reason('git push --force origin $env:BRANCH', { branch: 'feature' }, 'PowerShell') || '', /cannot tell which branch/);
+  for (const command of ['git push origin :$BRANCH', 'git push origin --delete "$BRANCH"']) {
+    assert.match(reason(command, {}) || '', /whose name only gets its value once the shell runs/, command);
+  }
+  assert.equal(reason('git push --force origin $SHA:refs/heads/feature', { branch: 'feature' }), null, 'the branch written to is named');
 });
 
 test('blocks --mirror and deleting main on the remote', () => {
