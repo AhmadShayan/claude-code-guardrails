@@ -27,14 +27,17 @@ function readStdin(stream) {
 // Guards read what git prints, so git answers in English whatever the machine's language,
 // takes no optional locks while it only looks, and never stops to ask for a password. A
 // failed call keeps git's stderr on the error, which lets a guard tell "not a repository"
-// apart from "could not check". A spent budget fails the same way a timeout does.
+// apart from "could not check". A spent budget fails the same way a timeout does. A
+// repository can also name a program for git to run while it checks the working tree
+// (core.fsmonitor), and the hook asks before the user has approved anything, so that
+// setting is switched off for every question the hook asks.
 function makeGit(deadline) {
   return function git(args, cwd) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       throw Object.assign(new Error('the hook ran out of time before git answered'), { code: 'ETIMEDOUT' });
     }
-    return execFileSync('git', args, {
+    return execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], {
       cwd,
       env: { ...process.env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
       encoding: 'utf8',

@@ -2,6 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
 const { decide, makeGit } = require('../scripts/lib/runner');
 
 const guard = (id, tools, check) => ({ id, tools, check });
@@ -95,4 +99,21 @@ test('a failed git call keeps what git printed on stderr', () => {
     () => makeGit(Date.now() + 10000)(['definitely-not-a-git-command'], process.cwd()),
     (err) => /not a git command/.test(String(err.stderr)),
   );
+});
+
+test('git never runs a program the repository names in its own config', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guardrails-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const marker = path.join(dir, 'fsmonitor-ran');
+  const program = path.join(dir, 'fsmonitor.js');
+  fs.writeFileSync(program, `require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran');\n`);
+  const slashes = (p) => p.replace(/\\/g, '/');
+  const git = (...args) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
+  git('init', '-q');
+  fs.writeFileSync(path.join(dir, 'app.js'), 'let unsaved = true;\n');
+  git('add', 'app.js');
+  git('config', 'core.fsmonitor', `"${slashes(process.execPath)}" "${slashes(program)}"`);
+
+  makeGit(Date.now() + 10000)(['status', '--porcelain'], dir);
+  assert.equal(fs.existsSync(marker), false);
 });

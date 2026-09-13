@@ -82,13 +82,27 @@ function secretKind(p) {
   return null;
 }
 
+// Where a path points, for asking the filesystem about it, or null when it must not be asked.
+// On Windows a path that starts with two slashes names another machine (\\server\share) or a
+// device (\\?\, \\.\). Looking one up connects to that machine before the user has approved
+// anything, and an unreachable one holds the lookup for close to 30 seconds, long enough for
+// Claude Code to stop waiting for the hook and run the call unchecked.
+function localPath(p, cwd, platform) {
+  const lib = platform === 'win32' ? path.win32 : path.posix;
+  const resolved = lib.resolve(cwd || '.', String(p));
+  return platform === 'win32' && /^[\\/]{2}/.test(resolved) ? null : resolved;
+}
+
 // The kind of secret a path holds, following a symlink to the file it points at. `via` names
-// that file when the path's own name looks innocent.
-function kindOf(p, cwd) {
+// that file when the path's own name looks innocent. A path on another machine is judged by
+// its name alone.
+function kindOf(p, cwd, platform) {
   const direct = secretKind(p);
   if (direct) return { kind: direct, via: null };
+  const local = localPath(p, cwd, platform);
+  if (!local) return null;
   try {
-    const real = fs.realpathSync.native(path.resolve(cwd || '.', String(p)));
+    const real = fs.realpathSync.native(local);
     const kind = secretKind(real);
     return kind ? { kind, via: baseName(real) } : null;
   } catch {
@@ -96,9 +110,11 @@ function kindOf(p, cwd) {
   }
 }
 
-function isFolder(p, cwd) {
+function isFolder(p, cwd, platform) {
+  const local = localPath(p, cwd, platform);
+  if (!local) return false;
   try {
-    return fs.statSync(path.resolve(cwd || '.', String(p))).isDirectory();
+    return fs.statSync(local).isDirectory();
   } catch {
     return false;
   }
@@ -184,18 +200,18 @@ function filesPrinted(words) {
 }
 
 // `command < file` hands the whole file to the command, whatever the command is.
-function inputReason(words, cwd) {
+function inputReason(words, cwd, platform) {
   for (let i = 0; i < words.length - 1; i += 1) {
     if (words[i] !== '<' || words[i + 1].includes(SUBSTITUTION)) continue;
-    const found = kindOf(words[i + 1], cwd);
+    const found = kindOf(words[i + 1], cwd, platform);
     if (found) return explain(words[i + 1], found, 'feeding it to this command');
   }
   return null;
 }
 
-function printReason(words, cwd) {
+function printReason(words, cwd, platform) {
   for (const file of filesPrinted(words)) {
-    const found = kindOf(file, cwd);
+    const found = kindOf(file, cwd, platform);
     if (found) return explain(file, found, 'this command');
   }
   return null;
@@ -262,14 +278,15 @@ function renameTarget(words, cwd, ctx) {
 }
 
 function copyReason(words, cwd, ctx) {
+  const platform = ctx.platform || process.platform;
   const target = renameTarget(words, cwd, ctx);
   if (!target) return null;
   const copy = readCopy(target.words);
   if (!copy || !copy.destination || copy.destination.includes(SUBSTITUTION)) return null;
-  if (copy.intoFolder || /[\\/]$/.test(copy.destination) || isFolder(copy.destination, target.base) || secretKind(copy.destination)) return null;
+  if (copy.intoFolder || /[\\/]$/.test(copy.destination) || isFolder(copy.destination, target.base, platform) || secretKind(copy.destination)) return null;
   for (const source of copy.sources) {
     if (source.includes(SUBSTITUTION)) continue;
-    const found = kindOf(source, target.base);
+    const found = kindOf(source, target.base, platform);
     if (!found) continue;
     return `This ${COPIERS[copy.name]} \`${baseName(source)}\`, which is ${found.kind}, to \`${baseName(copy.destination)}\`, a name that does not look secret. Under that name its secrets (API keys, passwords) could be read into this conversation without this guard noticing. To keep a backup, copy it into a folder so it keeps its name, for example cp ${shellQuote(String(source).replace(/\\/g, '/'))} backups/ instead.`;
   }
@@ -277,17 +294,18 @@ function copyReason(words, cwd, ctx) {
 }
 
 function commandReason(command, dialect, cwd, ctx) {
+  const platform = ctx.platform || process.platform;
   for (const words of commandsOf(command, dialect)) {
-    const reason = inputReason(words, cwd) || printReason(words, cwd) || copyReason(words, cwd, ctx);
+    const reason = inputReason(words, cwd, platform) || printReason(words, cwd, platform) || copyReason(words, cwd, ctx);
     if (reason) return reason;
   }
   return null;
 }
 
-function grepReason(input, cwd) {
+function grepReason(input, cwd, platform) {
   if ((input.output_mode || 'files_with_matches') !== 'content') return null;
   if (input.path) {
-    const found = kindOf(input.path, cwd);
+    const found = kindOf(input.path, cwd, platform);
     if (found) return explain(String(input.path), found, 'searching it');
   }
   if (input.glob) {
@@ -303,11 +321,12 @@ function grepReason(input, cwd) {
 function check(payload, ctx = {}) {
   const input = payload.tool_input || {};
   const cwd = payload.cwd;
+  const platform = ctx.platform || process.platform;
   if (payload.tool_name === 'Read') {
-    const found = input.file_path ? kindOf(input.file_path, cwd) : null;
+    const found = input.file_path ? kindOf(input.file_path, cwd, platform) : null;
     return found ? explain(String(input.file_path), found, 'reading it') : null;
   }
-  if (payload.tool_name === 'Grep') return grepReason(input, cwd);
+  if (payload.tool_name === 'Grep') return grepReason(input, cwd, platform);
   return commandReason(String(input.command || ''), dialectOf(payload.tool_name), cwd, ctx);
 }
 
