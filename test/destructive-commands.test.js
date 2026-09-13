@@ -146,14 +146,32 @@ test('blocks git clean only when there are untracked files to lose', () => {
 });
 
 test('refuses git clean when part of the command only gets its value once the shell runs', () => {
-  const git = fakeGit({ 'clean -n -d': 'Would remove notes.md\n' });
-  assert.match(reason('git clean -fd $(printf .)', { git }) || '', /cannot tell what would be deleted/);
-  assert.match(reason('git clean -fd -e "$(cat keep.txt)"', { git }) || '', /cannot tell what would be deleted/);
+  const git = fakeGit({ 'clean -n -d': 'Would remove notes.md\n', 'clean -n -d -x': 'Would remove notes.md\nWould remove .env\n' });
+  for (const command of ['git clean -fd $(printf .)', 'git clean -fd -e "$(cat keep.txt)"', 'git clean -f $DIR', 'git clean -fd -- "$DIR"', 'git clean $FLAGS']) {
+    assert.match(reason(command, { git }) || '', /cannot tell what would be deleted/, command);
+  }
   assert.equal(reason('git clean -n $(printf .)', { git }), null, 'a dry run deletes nothing');
+  const nothingUntracked = fakeGit({ 'clean -n -d': '', 'clean -n -d -x': '' });
+  assert.equal(reason('git clean -fd $DIR', { git: nothingUntracked }), null, 'with nothing untracked or ignored, there is nothing to lose');
+});
+
+test('refuses git reset --hard to a commit the shell fills in', () => {
+  const clean = fakeGit({ 'status --porcelain --untracked-files=no': '' });
+  for (const command of ['git reset --hard $REF', 'git reset --hard "${REF}"', 'git reset --hard $(git rev-parse HEAD~3)']) {
+    assert.match(reason(command, { git: clean }) || '', /a commit the guard cannot see until the command runs/, command);
+  }
+  assert.match(reason('git reset --hard $env:REF', { git: clean, toolName: 'PowerShell' }) || '', /cannot see until the command runs/);
+});
+
+test('refuses a git stash action the shell fills in, when there are stashes to lose', () => {
+  assert.match(reason('git stash $ACTION', { git: fakeGit({ 'stash list': 'stash@{0}: WIP\n' }) }) || '', /could be git stash clear, which deletes the saved stash/);
+  assert.equal(reason('git stash $ACTION', { git: fakeGit({ 'stash list': '' }) }), null);
+  assert.equal(reason('git stash push -m "$MESSAGE"', { git: fakeGit({ 'stash list': 'stash@{0}: WIP\n' }) }), null);
+  assert.equal(reason('git stash -m "$MESSAGE"', { git: fakeGit({ 'stash list': 'stash@{0}: WIP\n' }) }), null);
 });
 
 test('blocks git stash clear when stashes exist, and gh repo delete', () => {
-  assert.match(reason('git stash clear', { git: fakeGit({ 'stash list': 'stash@{0}: WIP\nstash@{1}: WIP\n' }) }) || '', /all 2 saved stashes/);
+  assert.match(reason('git stash clear', { git: fakeGit({ 'stash list': 'stash@{0}: WIP\nstash@{1}: WIP\n' }) }) || '', /both saved stashes/);
   assert.equal(reason('git stash clear', { git: fakeGit({ 'stash list': '' }) }), null);
   assert.equal(reason('git stash pop'), null);
   assert.match(reason('gh repo delete me/app --yes') || '', /permanently deletes a GitHub repository/);

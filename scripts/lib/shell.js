@@ -16,6 +16,12 @@
 
 const SUBSTITUTION = '\u0000';
 
+// True when a word only gets its real value once the shell runs: a substitution, or a
+// variable such as $BRANCH, ${REF}, $env:NAME or %NAME%.
+function hasShellValue(word) {
+  return String(word).includes(SUBSTITUTION) || /[$%]/.test(word);
+}
+
 const REDIRECTS = new Set(['<', '>', '>>', '<<', '<<<', '>&', '<&', '&>', '&>>', '>|']);
 
 const WRAPPERS = new Set(['sudo', 'doas', 'command', 'builtin', 'exec', 'nohup', 'time', 'nice', 'timeout', 'env', 'xargs']);
@@ -233,4 +239,4 @@ function isRedirect(word) {
   return REDIRECTS.has(word);
 }
 
-module.exports = { SUBSTITUTION, tokenize, commandsOf, commandName, dialectOf, stripPrefix, isRedirect };
+module.exports = { SUBSTITUTION, hasShellValue, tokenize, commandsOf, commandName, dialectOf, stripPrefix, isRedirect };
