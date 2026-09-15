@@ -21,6 +21,8 @@ claude plugin install claude-code-guardrails@ahmadshayan
 
 Inside a Claude Code session, `/plugin marketplace add` and `/plugin install` take the same arguments. Start a new session afterwards. The hooks need Node.js 20 or newer on your `PATH`.
 
+That install follows `main`. Run `claude plugin marketplace update ahmadshayan` and then `claude plugin update claude-code-guardrails@ahmadshayan` to pick up a new release. To stay on one release instead, add the marketplace at its tag, for example `claude plugin marketplace add AhmadShayan/claude-code-guardrails@v0.1.2`. Releases from v0.1.1 on are immutable, so their tags cannot be moved to different code.
+
 ## What it blocks
 
 **secret-files** keeps secrets out of the conversation. It blocks reading `.env` files (templates such as `.env.example` stay readable), SSH private keys, certificate and key files such as `.pem` and `.key`, cloud credentials and service account keys, whether through the Read tool, Grep, or a command such as `cat`, `grep`, `sed` or `Get-Content`. It follows symlinks, and it blocks copying, moving or linking a secret file to a name that does not look secret, so a second name cannot carry the file past the check. Checking that a variable is set with `grep -q '^STRIPE_SECRET_KEY=' .env` still works, because it prints nothing.
